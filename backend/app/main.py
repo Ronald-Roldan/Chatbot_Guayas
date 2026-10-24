@@ -39,7 +39,7 @@ class Settings(BaseSettings):
 settings = Settings()
 supabase: Client = create_client(settings.supabase_url, settings.supabase_service_role_key)
 genai_client = genai.Client(api_key=settings.google_api_key)
-groq_client = Groq(api_key=settings.groq_api_key, base_url="https://api.groq.com/openai/v1")
+groq_client = Groq(api_key=settings.groq_api_key, base_url="https://api.groq.com")
 
 app = FastAPI(title="RAG API", version="1.0.0")
 origins = [origin.strip() for origin in settings.allowed_origins.split(",") if origin.strip()]
