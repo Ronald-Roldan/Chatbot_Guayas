@@ -30,10 +30,15 @@ export default function App() {
     setMessages(items => [...items, { role: 'user', content: text }]); setQuestion(''); setChatBusy(true)
     try {
       const response = await fetch(`${API}/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: text }) })
-      const data = await response.json()
-      if (!response.ok) throw new Error(data.detail || 'No se pudo consultar el asistente.')
+      let data
+      try { data = await response.json() } catch { throw new Error('El backend devolvió una respuesta inválida.') }
+      if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'No se pudo consultar el asistente.')
+      if (typeof data.answer !== 'string' || !data.answer.trim()) throw new Error('El asistente devolvió una respuesta vacía. Inténtalo de nuevo.')
       setMessages(items => [...items, { role: 'assistant', content: data.answer, sources: data.sources || [] }])
-    } catch (error) { setMessages(items => [...items, { role: 'assistant', content: `Error: ${error.message}`, sources: [], error: true }]) }
+    } catch (error) {
+      const message = error instanceof TypeError ? 'No se pudo conectar con el backend. Comprueba que la API esté en línea.' : error.message
+      setMessages(items => [...items, { role: 'assistant', content: `Error: ${message}`, sources: [], error: true }])
+    }
     finally { setChatBusy(false) }
   }
 
