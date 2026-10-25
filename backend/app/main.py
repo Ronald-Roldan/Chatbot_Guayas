@@ -6,10 +6,12 @@ import re
 import tempfile
 import time
 from pathlib import Path
+from threading import Lock
 from typing import Any
+from uuid import uuid4
 
 import fitz
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
 from google.genai import errors, types
@@ -44,6 +46,8 @@ genai_client = genai.Client(api_key=settings.google_api_key)
 groq_client = Groq(api_key=settings.groq_api_key, base_url="https://api.groq.com")
 
 app = FastAPI(title="RAG API", version="1.0.0")
+upload_jobs: dict[str, dict[str, Any]] = {}
+upload_jobs_lock = Lock()
 origins = [origin.strip() for origin in settings.allowed_origins.split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
@@ -105,8 +109,62 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/upload")
-def upload_pdf(file: UploadFile = File(...)) -> dict[str, Any]:
+def update_upload_job(job_id: str, **updates: Any) -> None:
+    with upload_jobs_lock:
+        upload_jobs[job_id].update(updates)
+
+
+def process_pdf(temp_path: str, filename: str, job_id: str) -> None:
+    try:
+        with fitz.open(temp_path) as pdf:
+            pages = [page.get_text("text") for page in pdf]
+        full_text = "\n".join(pages).strip()
+        if not full_text:
+            raise HTTPException(status_code=422, detail="No se encontró texto. El PDF podría ser un escaneo sin OCR.")
+
+        chunks = splitter.split_text(full_text)
+        update_upload_job(job_id, status="processing", pages=len(pages), total_chunks=len(chunks))
+        embeddings = []
+        for offset in range(0, len(chunks), 50):
+            batch = chunks[offset : offset + 50]
+            embeddings.extend(embed_many(batch, "RETRIEVAL_DOCUMENT"))
+            update_upload_job(job_id, processed_chunks=len(embeddings))
+            logger.info("Trabajo %s: embeddings para %s de %s fragmentos", job_id, len(embeddings), len(chunks))
+
+        rows = [
+            {
+                "content": chunk,
+                "embedding": embeddings[index],
+                "metadata": {"source": filename, "chunk": index, "pages": len(pages)},
+            }
+            for index, chunk in enumerate(chunks)
+        ]
+        for offset in range(0, len(rows), 50):
+            supabase.table("documents").insert(rows[offset : offset + 50]).execute()
+
+        result = {
+            "filename": filename,
+            "pages": len(pages),
+            "chunks": len(chunks),
+            "message": "PDF procesado",
+        }
+        update_upload_job(job_id, status="completed", result=result)
+    except HTTPException as exc:
+        update_upload_job(job_id, status="failed", error=exc.detail)
+    except Exception:
+        logger.exception("Falló el procesamiento del PDF, trabajo %s", job_id)
+        update_upload_job(
+            job_id,
+            status="failed",
+            error="No se pudo procesar el PDF. Revisa las claves y los logs del backend.",
+        )
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+@app.post("/upload", status_code=202)
+def upload_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(...)) -> dict[str, Any]:
     if not file.filename or Path(file.filename).suffix.lower() != ".pdf":
         raise HTTPException(status_code=400, detail="Solo se aceptan archivos PDF")
     if file.content_type not in ("application/pdf", "application/octet-stream"):
@@ -123,29 +181,22 @@ def upload_pdf(file: UploadFile = File(...)) -> dict[str, Any]:
                     raise HTTPException(status_code=413, detail=f"El máximo es {settings.max_upload_mb} MB")
                 temp.write(data)
 
-        with fitz.open(temp_path) as pdf:
-            pages = [page.get_text("text") for page in pdf]
-        full_text = "\n".join(pages).strip()
-        if not full_text:
-            raise HTTPException(status_code=422, detail="No se encontró texto. El PDF podría ser un escaneo sin OCR.")
-
-        chunks = splitter.split_text(full_text)
-        embeddings = []
-        for offset in range(0, len(chunks), 50):
-            batch = chunks[offset : offset + 50]
-            embeddings.extend(embed_many(batch, "RETRIEVAL_DOCUMENT"))
-            logger.info("Generados embeddings para %s de %s fragmentos", len(embeddings), len(chunks))
-        rows = [
-            {
-                "content": chunk,
-                "embedding": embeddings[index],
-                "metadata": {"source": Path(file.filename).name, "chunk": index, "pages": len(pages)},
+        job_id = str(uuid4())
+        filename = Path(file.filename).name
+        with upload_jobs_lock:
+            upload_jobs[job_id] = {
+                "job_id": job_id,
+                "status": "queued",
+                "filename": filename,
+                "pages": 0,
+                "total_chunks": 0,
+                "processed_chunks": 0,
             }
-            for index, chunk in enumerate(chunks)
-        ]
-        for offset in range(0, len(rows), 50):
-            supabase.table("documents").insert(rows[offset : offset + 50]).execute()
-        return {"filename": Path(file.filename).name, "pages": len(pages), "chunks": len(chunks), "message": "PDF procesado"}
+        if temp_path is None:
+            raise RuntimeError("No se pudo preparar el archivo temporal")
+        background_tasks.add_task(process_pdf, temp_path, filename, job_id)
+        temp_path = None
+        return {"job_id": job_id, "status": "queued", "filename": filename}
     except HTTPException:
         raise
     except Exception as exc:
@@ -155,6 +206,15 @@ def upload_pdf(file: UploadFile = File(...)) -> dict[str, Any]:
         file.file.close()
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+@app.get("/upload/{job_id}")
+def upload_status(job_id: str) -> dict[str, Any]:
+    with upload_jobs_lock:
+        job = upload_jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="No se encontró el trabajo de carga")
+        return dict(job)
 
 
 @app.post("/chat")

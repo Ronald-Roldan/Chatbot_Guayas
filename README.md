@@ -62,7 +62,7 @@ Los IDs pedidos originalmente (`text-embedding-004` y `llama-3.3-70b-versatile`)
 
 La API usa CORS abierto por defecto. Si lo restringes mediante `ALLOWED_ORIGINS`, añade el dominio público de Cloudflare Pages. Para despliegue local, sigue la sección de inicio local más arriba.
 
-Backend env: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`, opcionales `GOOGLE_EMBEDDING_MODEL`, `GROQ_MODEL`, `EMBEDDING_DIMENSIONS`, `MAX_UPLOAD_MB`, `TOP_K`, `MATCH_THRESHOLD`, `ALLOWED_ORIGINS`. `MAX_UPLOAD_MB=0` desactiva el límite artificial de tamaño de la aplicación; Render, la memoria/almacenamiento disponibles y las cuotas de Google/Supabase siguen imponiendo sus propios límites. Los embeddings de documentos se solicitan en lotes y el backend reintenta cuando Google devuelve una cuota temporal agotada. Frontend env: `VITE_API_URL` (local: `http://localhost:8000`).
+Backend env: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`, opcionales `GOOGLE_EMBEDDING_MODEL`, `GROQ_MODEL`, `EMBEDDING_DIMENSIONS`, `MAX_UPLOAD_MB`, `TOP_K`, `MATCH_THRESHOLD`, `ALLOWED_ORIGINS`. `MAX_UPLOAD_MB=0` desactiva el límite artificial de tamaño de la aplicación; Render, la memoria/almacenamiento disponibles y las cuotas de Google/Supabase siguen imponiendo sus propios límites. `/upload` devuelve un identificador de trabajo y procesa el PDF en segundo plano; consulta `GET /upload/{job_id}` para el progreso y resultado. Los embeddings de documentos se solicitan en lotes y el backend reintenta cuando Google devuelve una cuota temporal agotada. Frontend env: `VITE_API_URL` (local: `http://localhost:8000`).
 
 ## Seguridad y coste
 
