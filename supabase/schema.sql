@@ -21,7 +21,7 @@ revoke all on public.documents from anon, authenticated;
 create or replace function public.match_documents_hybrid(
   query_embedding extensions.vector(768),
   query_text text,
-  match_threshold float default 0.25,
+  match_threshold float default 0.63,
   match_count int default 5
 )
 returns table (id bigint, content text, metadata jsonb, similarity float)
@@ -32,6 +32,19 @@ as $$
     select nullif(string_agg(distinct term, ' | '), '')::tsquery as tsquery
     from regexp_split_to_table(lower(coalesce(query_text, '')), '[^[:alnum:]]+') as terms(term)
     where length(term) >= 3
+      and term not in (
+        'que', 'qué', 'como', 'cómo', 'cuando', 'cuándo', 'donde', 'dónde',
+        'cual', 'cuál', 'cuales', 'cuáles', 'quien', 'quién', 'quienes', 'quiénes',
+        'para', 'por', 'con', 'sin', 'sobre', 'entre', 'desde', 'hasta', 'del',
+        'las', 'los', 'una', 'uno', 'unos', 'unas', 'esta', 'este', 'estas', 'estos',
+        'ese', 'esa', 'eso', 'esas', 'esos', 'tiene', 'tienen', 'hay', 'ser', 'son',
+        'fue', 'fueron', 'mis', 'tus', 'sus', 'nuestro', 'nuestra', 'segun', 'según',
+        'mas', 'más', 'documento', 'documentos',
+        'the', 'and', 'for', 'with', 'from', 'that', 'this', 'what', 'when', 'where',
+        'which', 'who', 'how', 'why', 'does', 'did', 'are', 'was', 'were', 'has',
+        'have', 'your', 'you', 'not', 'can', 'could', 'should', 'would', 'about',
+        'into', 'according', 'document', 'documents'
+      )
   ),
   ranked as (
     select d.id,

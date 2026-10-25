@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     groq_model: str = "openai/gpt-oss-20b"
     max_upload_mb: int = Field(default=0, ge=0)
     top_k: int = 5
-    match_threshold: float = 0.25
+    match_threshold: float = 0.63
     allowed_origins: str = "*"
 
 
