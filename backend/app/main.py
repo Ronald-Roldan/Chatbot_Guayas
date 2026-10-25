@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +12,7 @@ import fitz
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 from groq import Groq
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel, Field
@@ -30,7 +32,7 @@ class Settings(BaseSettings):
     google_embedding_model: str = "gemini-embedding-001"
     embedding_dimensions: int = 768
     groq_model: str = "openai/gpt-oss-20b"
-    max_upload_mb: int = 15
+    max_upload_mb: int = Field(default=0, ge=0)
     top_k: int = 5
     match_threshold: float = 0.25
     allowed_origins: str = "*"
@@ -59,17 +61,38 @@ class ChatRequest(BaseModel):
 
 
 def embed(text: str, task_type: str) -> list[float]:
-    result = genai_client.models.embed_content(
-        model=settings.google_embedding_model,
-        contents=text,
-        config=types.EmbedContentConfig(
-            task_type=task_type,
-            output_dimensionality=settings.embedding_dimensions,
-        ),
-    )
-    if not result.embeddings or not result.embeddings[0].values:
-        raise RuntimeError("Google devolvió un embedding vacío")
-    return list(result.embeddings[0].values)
+    return embed_many([text], task_type)[0]
+
+
+def embed_many(texts: list[str], task_type: str) -> list[list[float]]:
+    for attempt in range(4):
+        try:
+            result = genai_client.models.embed_content(
+                model=settings.google_embedding_model,
+                contents=texts,
+                config=types.EmbedContentConfig(
+                    task_type=task_type,
+                    output_dimensionality=settings.embedding_dimensions,
+                ),
+            )
+            if not result.embeddings or len(result.embeddings) != len(texts):
+                raise RuntimeError("Google devolvió una cantidad incorrecta de embeddings")
+            if any(not embedding.values for embedding in result.embeddings):
+                raise RuntimeError("Google devolvió un embedding vacío")
+            return [list(embedding.values) for embedding in result.embeddings]
+        except errors.APIError as exc:
+            if exc.code != 429:
+                raise
+            if attempt == 3:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Se agotó temporalmente la cuota de embeddings de Google. Espera un minuto y vuelve a intentarlo.",
+                ) from exc
+            retry_after = re.search(r"retry in ([\d.]+)s", str(exc), re.IGNORECASE)
+            delay = float(retry_after.group(1)) if retry_after else min(60, 5 * (2**attempt))
+            delay = min(60, max(1, delay + 1))
+            logger.warning("Cuota de embeddings agotada; reintentando en %.0f segundos", delay)
+            time.sleep(delay)
 
 
 @app.get("/")
@@ -96,7 +119,7 @@ def upload_pdf(file: UploadFile = File(...)) -> dict[str, Any]:
             size = 0
             while data := file.file.read(1024 * 1024):
                 size += len(data)
-                if size > settings.max_upload_mb * 1024 * 1024:
+                if settings.max_upload_mb > 0 and size > settings.max_upload_mb * 1024 * 1024:
                     raise HTTPException(status_code=413, detail=f"El máximo es {settings.max_upload_mb} MB")
                 temp.write(data)
 
@@ -107,13 +130,19 @@ def upload_pdf(file: UploadFile = File(...)) -> dict[str, Any]:
             raise HTTPException(status_code=422, detail="No se encontró texto. El PDF podría ser un escaneo sin OCR.")
 
         chunks = splitter.split_text(full_text)
-        rows = []
-        for index, chunk in enumerate(chunks):
-            rows.append({
+        embeddings = []
+        for offset in range(0, len(chunks), 50):
+            batch = chunks[offset : offset + 50]
+            embeddings.extend(embed_many(batch, "RETRIEVAL_DOCUMENT"))
+            logger.info("Generados embeddings para %s de %s fragmentos", len(embeddings), len(chunks))
+        rows = [
+            {
                 "content": chunk,
-                "embedding": embed(chunk, "RETRIEVAL_DOCUMENT"),
+                "embedding": embeddings[index],
                 "metadata": {"source": Path(file.filename).name, "chunk": index, "pages": len(pages)},
-            })
+            }
+            for index, chunk in enumerate(chunks)
+        ]
         for offset in range(0, len(rows), 50):
             supabase.table("documents").insert(rows[offset : offset + 50]).execute()
         return {"filename": Path(file.filename).name, "pages": len(pages), "chunks": len(chunks), "message": "PDF procesado"}
@@ -160,4 +189,6 @@ def chat(payload: ChatRequest) -> dict[str, Any]:
         return {"answer": answer, "sources": sources}
     except Exception as exc:
         logger.exception("Falló la consulta RAG")
+        if isinstance(exc, HTTPException):
+            raise
         raise HTTPException(status_code=502, detail="No se pudo completar la consulta. Revisa la configuración del backend.") from exc

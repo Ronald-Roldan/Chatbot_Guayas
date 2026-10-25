@@ -24,3 +24,5 @@ services:
         value: 768
       - key: GROQ_MODEL
         value: openai/gpt-oss-20b
+      - key: MAX_UPLOAD_MB
+        value: 0
